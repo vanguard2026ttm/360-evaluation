@@ -86,6 +86,8 @@ button.big{font-size:15px;padding:10px 20px}
 .nomcard.approved{border-color:#9fd7b5}.nomcard.returned{border-color:#efb7b0}
 .nextbar{display:flex;align-items:center;gap:12px;background:#fff7e6;border:1px solid #f3d29a;border-radius:10px;padding:12px 16px;margin-bottom:16px}
 .nextbar b{color:#7a4b00}.nextbar .sp{flex:1}
+.mback{position:fixed;inset:0;background:rgba(20,30,45,.45);display:flex;align-items:center;justify-content:center;z-index:50;padding:16px}
+.mbox{background:#fff;border-radius:12px;max-width:560px;width:100%;padding:22px 24px;box-shadow:0 10px 40px rgba(0,0,0,.25)}
 </style>
 </head>
 <body>
@@ -224,20 +226,25 @@ function defaultState() {
       minShow: 2, gapThr: 0.5,
       levels: [{ min: 4.5, label: 'Outstanding' }, { min: 3.75, label: 'Exceeds Expectations' }, { min: 3.0, label: 'Meets Expectations' }, { min: 2.0, label: 'Partially Meets Expectations' }, { min: 0, label: 'Needs Improvement' }],
       formUrl: '', prefill: null, nomUrl: '', lmAuto: true, peerOnly: true,
+      nomFormUrl: '', nomPrefill: null, appUrl: '', tplEvalDup: '', tplNomDup: '',
       tpl: {
-        invite: 'Dear colleagues,\n\nOur {{project}} is starting. Please choose the colleagues (peers) who will give you feedback.\n\nClick this link, pick your name and tick your peers – it takes 1 minute:\n{{nomLink}}\n\nPlease submit by {{deadlineNom}}.\n\nThank you,\n{{manager}}',
+        invite: NEW_INVITE,
         taskIntro: 'You are invited to give feedback for {{project}}. Please complete one form for each person below by {{deadlineEval}}. Each link is personal to you and the person you evaluate – please do not forward it.',
         taskClosing: 'Your answers are sent only to {{manager}} and are reported to each person as averages by rater group.\n\nThank you for your time,\n{{manager}}'
       }
     },
-    participants: [], noms: {}, sent: {}, codes: {}, resp: null, ui: { tab: 'setup', nomFilter: 'all', resultPid: '' }
+    participants: [], noms: {}, sent: {}, codes: {}, nomCodes: {}, nomSent: {}, resp: null, ui: { tab: 'setup', nomFilter: 'all', resultPid: '' }
   };
 }
-let S = load();
+const NEW_INVITE = 'Dear {{name}},\n\nOur {{project}} is starting. Please choose the colleagues (peers) who will give you feedback.\n\nThis is your personal link – your name is already filled in. Tick your peers and press Submit (about 1 minute):\n{{nomLink}}\n\nPlease submit by {{deadlineNom}}. Please do not forward this link.\n\nThank you,\n{{manager}}';
+const NOM_MODE = /^#nom=/.test(location.hash);
+let S = NOM_MODE ? defaultState() : load();
 function load() {
-  try { const s = JSON.parse(localStorage.getItem(STORE) || 'null'); if (s && s.settings) return merge(defaultState(), s); } catch (e) {}
+  try { const s = JSON.parse(localStorage.getItem(STORE) || 'null'); if (s && s.settings) return migrate(merge(defaultState(), s)); } catch (e) {}
   return defaultState();
 }
+/* older versions used one shared invitation ("pick your name"); personal links replace it */
+function migrate(s) { if (/pick your name/i.test(s.settings.tpl.invite || '')) s.settings.tpl.invite = NEW_INVITE; return s; }
 function merge(d, s) { for (const k in s) { if (s[k] && typeof s[k] === 'object' && !Array.isArray(s[k]) && d[k] && typeof d[k] === 'object' && !Array.isArray(d[k])) merge(d[k], s[k]); else d[k] = s[k]; } return d; }
 function save() { try { localStorage.setItem(STORE, JSON.stringify(S)); } catch (e) { toast('Browser storage is full or blocked – use "Save backup".', 5000); } }
 
@@ -355,7 +362,7 @@ function nextStep() {
   const st = S.settings, P = S.participants, ns = P.map(p => S.noms[p.id]);
   const pf = st.prefill && st.prefill.base && !st.prefill.error;
   if (!st.managerEmail) return ['Enter the manager name and email', 'setup'];
-  if (!pf || !st.nomUrl) return ['Add the evaluation form link and the nomination form link', 'setup'];
+  if (!evalFormReady() || !nomFormReady()) return ['Connect your Microsoft Forms – one-time setup by the account owner', 'setup'];
   if (!P.length) return ['Load the participant list', 'people'];
   const sub = ns.filter(n => n && n.status !== 'none').length;
   if (!sub) return ['Send the invitation email so everyone chooses their peers', 'nominate'];
@@ -372,16 +379,72 @@ function render() {
   const ns = nextStep();
   $('#main').innerHTML = `<div class="nextbar">👉 <span>Next: <b>${esc(ns[0])}</b></span><div class="sp"></div>${S.ui.tab !== ns[1] ? `<button class="sm" data-act="tab" data-arg="${ns[1]}">Go there</button>` : ''}</div>` + f();
   after[S.ui.tab] && after[S.ui.tab]();
+  connectNotice();
   if (S._dirty) { delete S._dirty; save(); }
+}
+/* first time on a computer/account with no forms connected: ask the owner to connect their own Microsoft Forms */
+function connectNotice() {
+  const old = $('#connectModal'); if (old) old.remove();
+  if (S.ui.connectAsked || (evalFormReady() && nomFormReady())) return;
+  const d = document.createElement('div'); d.id = 'connectModal';
+  d.innerHTML = `<div class="mback"><div class="mbox"><h2 style="margin:0 0 8px;color:var(--accent)">Connect to your Microsoft Forms?</h2>
+    <p>This program would like to connect to <b>two Microsoft Forms in your account</b> (evaluation and nomination). You, the owner of this account, set them up yourself – once, about 3 minutes. The program does not sign in to your account; all answers stay in your Forms.</p>
+    <p>โปรแกรมนี้ขอเชื่อมต่อกับ Microsoft Forms ในบัญชีของคุณ 2 ฟอร์ม (ฟอร์มประเมิน และฟอร์มเสนอชื่อ) เจ้าของบัญชีเป็นผู้ตั้งค่าเองครั้งเดียว ประมาณ 3 นาที โปรแกรมไม่ได้เข้าสู่บัญชีของคุณ และคำตอบทั้งหมดอยู่ในฟอร์มของคุณ</p>
+    <p class="small muted">Already set up on another computer? Use <b>Load backup</b> instead.</p>
+    <div class="row" style="margin-top:12px"><button class="big" data-act="connectNow">Set up now · ตั้งค่าเลย</button><button class="ghost" data-act="connectLater">Later</button><button class="ghost" data-act="restore">Load backup</button></div></div></div>`;
+  document.body.appendChild(d);
 }
 const after = {};
 
 /* ---------- 1 Setup ---------- */
+const conPill = (ok, label, soft) => `<span class="pill ${ok ? 'p-ok' : soft ? 'p-warn' : 'p-bad'}" style="margin-right:6px">${ok ? '✔' : soft ? '!' : '✘'} ${esc(label)}</span>`;
 function vSetup() {
   const st = S.settings, R = st.rules, pf = st.prefill;
   const sample = S.participants[0] || { id: 'E001', name: 'Sample Evaluatee', email: 'evaluatee@company.com' };
   const testLink = pf && pf.base ? buildLink({ ev: sample, cat: 'P', name: 'Sample Rater', email: 'rater@company.com' }) : '';
   return `
+  <div class="card" id="connectCard"><h2>Connect your Microsoft Forms · เชื่อมต่อ Microsoft Forms ของคุณ</h2>
+    <div class="note">This program uses <b>two Microsoft Forms in the account of the person who runs it</b>. The owner of the account sets them up <b>once</b> (about 3 minutes). The program never signs in to your account – it only builds links to your forms, and every answer stays in your own Forms.<br>
+    โปรแกรมนี้ขอเชื่อมต่อกับ Microsoft Forms 2 ฟอร์มในบัญชีของผู้ใช้เครื่องนี้ เจ้าของบัญชีเป็นผู้ตั้งค่าเอง ครั้งเดียว ประมาณ 3 นาที โปรแกรมไม่ได้เข้าสู่บัญชีของคุณ คำตอบทั้งหมดอยู่ในฟอร์มของคุณเท่านั้น</div>
+    <div class="row" style="margin:10px 0">${conPill(evalFormReady(), 'Evaluation form')}${conPill(nomFormReady(), 'Nomination form')}${conPill(!!appBase(), 'Program web address', true)}</div>
+
+    <h3>1 · Evaluation form · ฟอร์มประเมิน</h3>
+    ${st.tplEvalDup ? `<p class="hint"><a href="${esc(st.tplEvalDup)}" target="_blank" rel="noopener"><button class="ghost">Make my copy of the evaluation form ↗</button></a> &nbsp;Sign in with your own account and press <b>Duplicate it</b>.</p>` : `<details><summary class="small">No copy link from your admin? Create the form yourself</summary><ol class="small">
+      <li>First question: <b>Text</b> – "คุณกำลังประเมิน / You are evaluating" (the program fills it with the person's name and a secret code).</li>
+      <li>Then one <b>Rating 1–5</b> question per competency, each followed by a <b>Long answer</b> comment box whose title contains "Feedback" or "ข้อมูลเพิ่มเติม" and ends with "(For competency name)".</li></ol></details>`}
+    <ol class="small">
+      <li>In your copy: <b>Collect responses → Anyone can respond</b>; <b>Settings → One response per person</b> off.</li>
+      <li><b>⋯ → Get Pre-filled URL</b> → turn on pre-filled answers → type <code>CODE</code> in the first box → <b>Get Prefilled Link</b> → Copy, paste here:</li></ol>
+    <textarea id="pfUrl" style="min-height:60px" placeholder="https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=...&r...=CODE">${esc(st.formUrl)}</textarea>
+    <div class="row" style="margin-top:6px"><button data-act="parsePf">Check &amp; connect</button>${testLink ? `<a href="${esc(testLink)}" target="_blank" rel="noopener"><button class="ghost">Open a test link</button></a>` : ''}</div>
+    ${pf && pf.error ? `<div class="note warn">${esc(pf.error)}</div>` : ''}
+    ${pf && pf.params ? `<div class="small muted" style="margin-top:6px">${pf.params.some(p => p.role === 'code') ? '✔ Connected – each link carries the evaluated person and a secret code.' : '⚠ The CODE box was not found. Type CODE (capital letters) in the first box of the pre-filled link.'}</div>
+    <details style="margin-top:4px"><summary class="small muted">Advanced: what each field is filled with</summary><table class="t"><tr><th>Field ID</th><th>Your sample value</th><th>Fill with</th><th>Quoted (choice)</th></tr>
+      ${pf.params.map((p, i) => `<tr><td class="small muted">${esc(p.k)}</td><td>${esc(p.v.length > 50 ? p.v.slice(0, 50) + '…' : p.v)}</td><td><select data-bind="settings.prefill.params.${i}.role">${ROLES.map(([k, l]) => `<option value="${k}" ${p.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td><td>${p.q ? 'yes' : ''}</td></tr>`).join('')}</table></details>` : ''}
+
+    <h3>2 · Nomination form · ฟอร์มเสนอชื่อ</h3>
+    ${st.tplNomDup ? `<p class="hint"><a href="${esc(st.tplNomDup)}" target="_blank" rel="noopener"><button class="ghost">Make my copy of the nomination form ↗</button></a> &nbsp;Sign in and press <b>Duplicate it</b>.</p>` : `<details open><summary class="small">Create it yourself (2 questions, never needs editing)</summary><ol class="small">
+      <li>forms.office.com → <b>New Form</b> → title e.g. "360 Rater Nomination".</li>
+      <li>Question 1: <b>Text</b> – "ผู้เสนอชื่อ / Nominator" · subtitle "กรอกให้อัตโนมัติ / Filled in automatically" · Required.</li>
+      <li>Question 2: <b>Text</b>, Long answer on – "รายชื่อที่เลือก / Selected peers" · subtitle "กรอกให้อัตโนมัติ / Filled in automatically" · Required.</li></ol>
+      <p class="small muted">Names are not stored in this form. Each personal link brings the current participant list with it, so the form never changes when the list changes.</p></details>`}
+    <ol class="small">
+      <li><b>Collect responses → Anyone can respond</b>; <b>Settings → One response per person</b> off.</li>
+      <li><b>⋯ → Get Pre-filled URL</b> → turn on → type <code>CODE</code> in box 1 and <code>PEERS</code> in box 2 → <b>Get Prefilled Link</b> → Copy, paste here:</li></ol>
+    <textarea id="nomPfUrl" style="min-height:60px" placeholder="https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=...&r...=CODE&r...=PEERS">${esc(st.nomFormUrl)}</textarea>
+    <div class="row" style="margin-top:6px"><button data-act="parseNomPf">Check &amp; connect</button></div>
+    ${st.nomPrefill && st.nomPrefill.error ? `<div class="note warn">${esc(st.nomPrefill.error)}</div>` : ''}
+    ${nomFormReady() ? '<div class="small muted" style="margin-top:6px">✔ Connected – personal nomination links can be sent in step 3.</div>' : ''}
+
+    <h3>3 · Program web address</h3>
+    <p class="hint">Personal nomination links open this program's page. ${/^https?:$/.test(location.protocol) ? 'Detected automatically: <b>' + esc(location.href.split('#')[0]) + '</b>' : '<b>You opened the program as a file</b> – links to a file do not work for other people. Open the program from its web address (e.g. GitHub Pages), or type that address here:'}</p>
+    ${/^https?:$/.test(location.protocol) ? '' : `<label class="f">Program web address<input data-bind="settings.appUrl" value="${esc(st.appUrl)}" placeholder="https://yourname.github.io/360-evaluation/"></label>`}
+
+    <details style="margin-top:12px"><summary class="small muted">For the admin: copy links for new owners</summary>
+      <p class="hint" style="margin-top:6px">In <b>your</b> template forms: <b>⋯ → Collaborate or Duplicate → + Get a link to duplicate</b>. Paste them here and save a backup – a new owner who loads the backup gets "Make my copy" buttons. (Never use "view and edit" links: you would see their answers.)</p>
+      <div class="grid"><label class="f">Evaluation form – link to duplicate<input data-bind="settings.tplEvalDup" value="${esc(st.tplEvalDup)}"></label>
+      <label class="f">Nomination form – link to duplicate<input data-bind="settings.tplNomDup" value="${esc(st.tplNomDup)}"></label></div></details>
+  </div>
   <div class="card"><h2>Project & approver</h2><p class="hint">The approver receives every nomination and every form response.</p>
     <div class="grid">
       <label class="f">Project name<input data-bind="settings.project" value="${esc(st.project)}"></label>
@@ -399,39 +462,14 @@ function vSetup() {
       <label class="f">Min. External<input type="number" min="0" data-bind="settings.rules.minE" data-type="num" value="${R.minE}"></label>
       <label class="f">Max. raters (excl. self)<input type="number" min="0" data-bind="settings.rules.maxTotal" data-type="num" value="${R.maxTotal}"></label>
     </div>
-    <h3>Relationship labels</h3><p class="hint">Must match <b>exactly</b> the choices of the "Relationship" question in your Microsoft Form.</p>
-    <div class="grid">${st.categories.map((c, i) => `<label class="f">${['Self', 'Line Manager', 'Peer', 'Subordinate', 'External'][i]}<input data-bind="settings.categories.${i}.label" value="${esc(c.label)}"></label>`).join('')}</div>
-  </div>
-
-  <div class="card"><h2>Microsoft Form link</h2>
-    <p class="hint">Use <b>one</b> form for everybody. The tool fills in who is being evaluated and who is evaluating, so each evaluator gets a personal link per person.</p>
-    <div class="note"><b>No form yet?</b> Go to forms.office.com → <b>Quick Import</b> → upload <code>360_Evaluation_Form_QuickImport.docx</code>. It creates all 21 questions (code + 10 ratings + 10 comments). Then continue from step 3 below.</div>
-    <div class="note"><b>One-time form setup (5 minutes)</b>
-      <ol>
-        <li>At the top of your form add <b>one</b> Text question: <b>Evaluation code</b>, subtitle "Filled in automatically – do not change". Keep your 10 competency ratings and feedback boxes as they are.</li>
-        <li>Remove the person's name from the form title (e.g. "2026 TTM/E 360 Evaluation Form").</li>
-        <li>Settings → <b>Only people in my organization can respond</b> and <b>Record name</b> on (Forms then records who really answered – nobody can fake it). Use "Anyone can respond" only if you have external raters.</li>
-        <li>Settings → <b>One response per person</b> must be <b>off</b> (each evaluator fills the form several times, once per person). Do not share the summary link and do not add co-authors – then only you can see the answers.</li>
-        <li>Click <b>…</b> (top right) → <b>Get Pre-filled URL</b> → turn on pre-filled answers → type <code>CODE</code> in "Evaluation code" → <b>Get Prefilled Link</b>. Copy it and paste below.</li>
-      </ol>
-      <div class="small" style="margin-top:6px">The evaluator sees e.g. <i>"Kanya Wongudomsakda · your role: Peer · #K7QD-2MXA"</i>. The code is secret and unique to that evaluator + person. If anyone edits or deletes it, the answer is rejected in the analysis.</div></div>
-    <label class="f">Pre-filled link from Microsoft Forms<textarea id="pfUrl" placeholder="https://forms.office.com/Pages/ResponsePage.aspx?id=...&r...=EVALUATEE&...">${esc(st.formUrl)}</textarea></label>
-    <div class="row" style="margin-top:8px"><button data-act="parsePf">Read link</button>${testLink ? `<a href="${esc(testLink)}" target="_blank" rel="noopener"><button class="ghost">Open a test link</button></a>` : ''}</div>
-    ${pf && pf.error ? `<div class="note warn">${esc(pf.error)}</div>` : ''}
-    ${pf && pf.params ? `<h3>What each field is filled with</h3><table class="t"><tr><th>Field ID</th><th>Your sample value</th><th>Fill with</th><th>Quoted (choice)</th></tr>
-      ${pf.params.map((p, i) => `<tr><td class="small muted">${esc(p.k)}</td><td>${esc(p.v.length > 50 ? p.v.slice(0, 50) + '…' : p.v)}</td><td><select data-bind="settings.prefill.params.${i}.role">${ROLES.map(([k, l]) => `<option value="${k}" ${p.role === k ? 'selected' : ''}>${l}</option>`).join('')}</select></td><td>${p.q ? 'yes' : ''}</td></tr>`).join('')}</table>
-      <div class="small muted" style="margin-top:6px">Check: ${pf.params.some(p => p.role === 'code') ? '✔ locked evaluation code – evaluatee, evaluator and relationship are verified from the code' : '⚠ no evaluation code: the evaluator could change the pre-filled names. Recommended: one "Evaluation code" field.'} · ${['evName', 'evNameId', 'evId', 'evEmail', 'code'].some(r => pf.params.some(p => p.role === r)) ? '✔ evaluatee' : '✘ evaluatee missing'} · ${pf.params.some(p => ['raterEmail', 'raterName', 'code'].includes(p.role)) ? '✔ evaluator' : '✘ evaluator missing'} · ${pf.params.some(p => p.role === 'cat' || p.role === 'code') ? '✔ relationship' : '– relationship not pre-filled (will be taken from approvals)'}</div>` : ''}
-  </div>
-
-  <div class="card"><h2>Nomination form (Microsoft Forms)</h2>
-    <p class="hint">Participants click this link, pick their name and tick their peers. Use the normal share link of the nomination form (Collect responses → Copy link).</p>
-    <label class="f">Nomination form link<input data-bind="settings.nomUrl" value="${esc(st.nomUrl)}" placeholder="https://forms.cloud.microsoft/Pages/ResponsePage.aspx?id=..."></label>
     <div class="row" style="margin-top:10px;gap:18px">
       <label class="small"><input type="checkbox" data-bind="settings.lmAuto" data-type="bool" ${st.lmAuto ? 'checked' : ''}> The manager (${esc(st.managerName || 'approver')}) evaluates every participant as <b>Line Manager</b> automatically</label>
-      <label class="small"><input type="checkbox" data-bind="settings.peerOnly" data-type="bool" ${st.peerOnly ? 'checked' : ''}> Participants choose <b>Peers only</b></label>
-    </div>
-    <p class="hint" style="margin-top:6px">The form hides each person's own name: "Who are you?" branches to a section whose Peers list has everyone <b>except that person</b>. When the participant list changes: add the name to "Who are you?", add a section (copy of a Peers section) for the new person, add the new name to every other Peers list, then set <b>⋯ → Add branching</b> on "Who are you?" (each name → its own section; each section → End of the form). Names in the right format: <button class="sm ghost" data-act="copyNames">Copy names for the form</button></p>
+      <label class="small"><input type="checkbox" data-bind="settings.peerOnly" data-type="bool" ${st.peerOnly ? 'checked' : ''}> Participants choose <b>Peers only</b></label></div>
+    <details><summary class="small muted">Relationship labels</summary>
+    <h3>Relationship labels</h3><p class="hint">Must match <b>exactly</b> the choices of the "Relationship" question in your Microsoft Form.</p>
+    <div class="grid">${st.categories.map((c, i) => `<label class="f">${['Self', 'Line Manager', 'Peer', 'Subordinate', 'External'][i]}<input data-bind="settings.categories.${i}.label" value="${esc(c.label)}"></label>`).join('')}</div></details>
   </div>
+
   <div class="card"><h2>Email texts</h2><p class="hint">Placeholders: {{nomLink}} {{project}} {{manager}} {{deadlineNom}} {{deadlineEval}}</p>
     <div class="two">
       <label class="f">Nomination invitation<textarea style="min-height:200px" data-bind="settings.tpl.invite">${esc(st.tpl.invite)}</textarea></label>
@@ -521,27 +559,29 @@ async function tplPeople() {
 
 /* ---------- 3 Collect nominations ---------- */
 function vNominate() {
-  const st = S.settings, P = S.participants, ok = P.length && st.managerEmail;
+  const st = S.settings, P = S.participants, ok = P.length && st.managerEmail, ready = nomFormReady(), base = appBase();
   const sub = P.filter(p => S.noms[p.id] && S.noms[p.id].status !== 'none').length;
-  const hasLink = /^https?:\/\//.test(st.nomUrl || '');
+  const SEL = S.ui.nomSel || {}, selN = P.filter(p => SEL[p.id]).length;
+  const can = ok && ready && base;
+  const notSub = P.filter(p => !S.noms[p.id] || S.noms[p.id].status === 'none');
   return `${!ok ? '<div class="note warn">First add the manager email in <b>Setup</b> and load the <b>Participants</b>.</div>' : ''}
-  ${ok && !hasLink ? '<div class="note warn">Add the <b>nomination form link</b> in Setup.</div>' : ''}
-  <div class="card"><h2>Invite everyone to choose their peers</h2>
-    <p class="hint">One email to all participants (in BCC) with the nomination form link. They click, pick their name, tick peers, Submit.</p>
-    <div class="row"><button class="big" data-act="mailInvite" ${ok && hasLink ? '' : 'disabled'}>✉ Open invitation email in Outlook</button>
-    <button class="ghost" data-act="copyInvite" ${ok ? '' : 'disabled'}>Copy invitation text</button>
-    <button class="ghost" data-act="copyBcc" ${ok ? '' : 'disabled'}>Copy all emails</button>
-    ${hasLink ? `<a href="${esc(st.nomUrl)}" target="_blank" rel="noopener"><button class="ghost">Preview form</button></a>` : ''}</div>
-    <details style="margin-top:12px"><summary class="small muted">Alternative: offline nomination file (HTML attachment)</summary>
-      <p class="hint" style="margin-top:6px">Only if Forms can't be used. Participants open the file and email the result back; paste it in Approve.</p>
-      <button class="ghost sm" data-act="dlKit" ${ok ? '' : 'disabled'}>Download nomination file</button></details>
-  </div>
-  <div class="card"><div class="row"><h2 style="margin:0">Who has submitted</h2><div class="sp"></div><span class="pill p-blue">${sub} / ${P.length} submitted</span>
-    <button class="ghost sm" data-act="remindNom" ${P.length - sub ? '' : 'disabled'}>✉ Remind ${P.length - sub} not submitted</button></div>
-    <p class="hint" style="margin-top:6px">Status updates after you load the nomination responses in <b>Approve</b>.</p>
-    <div class="scroll" style="margin-top:6px"><table class="t"><tr><th>Name</th><th>Email</th><th>Status</th><th>Submitted</th><th>Peers</th></tr>
-    ${P.map(p => { const n = S.noms[p.id]; return `<tr><td>${esc(p.name)}</td><td class="small">${esc(p.email)}</td><td>${statusPill(n)}</td><td>${fmtDT(n && n.submittedAt)}</td><td>${n ? n.raters.length : ''}</td></tr>`; }).join('')}
-    </table></div></div>`;
+  ${ok && !ready ? '<div class="note warn">Connect the <b>nomination form</b> first: <b>Setup → Connect your Microsoft Forms</b>.</div>' : ''}
+  ${ok && !base ? '<div class="note warn">Personal links work only when this program is opened from its <b>web address</b> (e.g. GitHub Pages). Open it from there, or type the address in <b>Setup → Program web address</b>.</div>' : ''}
+  <div class="card"><h2>Send each person their personal nomination link</h2>
+    <p class="hint">Each link already knows who the person is and lists everyone else from the current participant list. They tick their peers and press Submit – nobody chooses "who am I", and nobody sees their own name. If you load a new participant list, links sent afterwards use the new list automatically.</p>
+    <div class="row"><button data-act="nomSendSel" ${can && selN ? '' : 'disabled'}>✉ Send selected (${selN})</button>
+      <button data-act="nomSendAll" ${can && notSub.length ? '' : 'disabled'}>✉ Send to everyone not submitted (${notSub.length})</button>
+      <div class="sp"></div><span class="pill p-blue">${sub} / ${P.length} submitted</span></div>
+    <p class="small muted" style="margin-top:6px">"Send" for several people saves <b>360_SendQueue.xlsx</b> – put it in OneDrive › 360 and run the same Power Automate flow as for evaluation links (step 5). Use the same buttons again as a reminder.</p>
+    <div class="scroll" style="margin-top:8px"><table class="t"><tr><th><input type="checkbox" title="Select all" data-act-change="nomSelAll" ${P.length && selN === P.length ? 'checked' : ''}></th><th>Name</th><th>Email</th><th>Status</th><th>Link sent</th><th></th></tr>
+    ${P.map(p => { const n = S.noms[p.id]; return `<tr><td><input type="checkbox" data-act-change="nomSel" data-arg="${esc(p.id)}" ${SEL[p.id] ? 'checked' : ''}></td><td>${esc(p.name)}</td><td class="small">${esc(p.email)}</td><td>${statusPill(n)}</td><td class="small">${fmtDT(S.nomSent && S.nomSent[p.id])}</td>
+      <td><div class="row" style="flex-wrap:nowrap"><button class="sm" data-act="nomSendOne" data-arg="${esc(p.id)}" ${can ? '' : 'disabled'}>✉ Send link</button><button class="sm ghost" data-act="nomCopy" data-arg="${esc(p.id)}" ${can ? '' : 'disabled'}>Copy link</button><button class="sm ghost" data-act="nomTest" data-arg="${esc(p.id)}" ${can ? '' : 'disabled'} title="Opens the page this person will see (nothing is sent)">Preview</button></div></td></tr>`; }).join('')}
+    </table></div>
+    <p class="hint" style="margin-top:6px">Status updates after you load the nomination responses in <b>Approve</b>.</p></div>
+  <details class="card"><summary class="small muted">Other methods (older)</summary>
+    <p class="hint" style="margin-top:8px">Shared form where everyone picks their own name (needs the old nomination form with branching), or an offline HTML file.</p>
+    <div class="row"><button class="ghost sm" data-act="mailInvite" ${ok && st.nomUrl ? '' : 'disabled'}>✉ One email to all (BCC) with the shared form link</button>
+    <button class="ghost sm" data-act="dlKit" ${ok ? '' : 'disabled'}>Download offline nomination file</button></div></details>`;
 }
 function statusPill(n) {
   const s = n ? n.status : 'none';
@@ -564,6 +604,107 @@ function mailto(to, subject, body, opt = {}) {
 function openMail(url) {
   if (url.length > 2000) toast('This email is long – some email apps cut long links. If text is missing, use the .eml or copy option.', 5000);
   location.href = url;
+}
+
+/* ---------- personal nomination links ---------- */
+/* Each participant gets a link to this same page with "#nom=<data>". The data (their name, the peer list,
+   a secret code and the nomination form address) lives only in the link: the part after "#" is never sent
+   to the web server. The page shows the peers, then opens the owner's Microsoft Form with everything filled in. */
+function nomCode(p) {
+  S.nomCodes = S.nomCodes || {};
+  if (!S.nomCodes[p.id]) { let c; do c = newCode(); while (Object.values(S.nomCodes).includes(c)); S.nomCodes[p.id] = c; S._dirty = true; }
+  return S.nomCodes[p.id];
+}
+const nomCodeText = p => p.name + ' · #' + nomCode(p);
+const peerText = p => p.name + ' (' + p.id + ')';
+function appBase() {
+  const st = S.settings;
+  if (/^https?:\/\//.test(st.appUrl || '')) return st.appUrl.split('#')[0];
+  return /^https?:$/.test(location.protocol) ? location.href.split('#')[0] : '';
+}
+const b64uEnc = bytes => { let s = ''; bytes.forEach(b => s += String.fromCharCode(b)); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const b64uDec = s => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const t = atob(s), u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i); return u; };
+async function packData(obj) {
+  const raw = new TextEncoder().encode(JSON.stringify(obj));
+  if (window.CompressionStream) {
+    const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate-raw'))).arrayBuffer());
+    return 'z' + b64uEnc(z);
+  }
+  return 'j' + b64uEnc(raw);
+}
+async function unpackData(s) {
+  let u = b64uDec(s.slice(1));
+  if (s[0] === 'z') u = new Uint8Array(await new Response(new Blob([u]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+  return JSON.parse(new TextDecoder().decode(u));
+}
+function nomFormReady() { const n = S.settings.nomPrefill; return !!(n && n.base && !n.error && n.params.some(p => p.role === 'nomCode') && n.params.some(p => p.role === 'nomPeers')); }
+function evalFormReady() { const p = S.settings.prefill; return !!(p && p.base && !p.error && p.params.some(x => x.role === 'code')); }
+async function nomLink(p) {
+  const st = S.settings, base = appBase(); if (!base || !nomFormReady()) return '';
+  const d = { v: 1, pj: st.project, m: st.managerName || 'Manager', lm: st.lmAuto ? 1 : 0, dl: st.deadlineNom || '', mn: st.rules.minP || 0, mx: st.rules.maxTotal || 0,
+    me: p.name, c: nomCodeText(p), pp: S.participants.filter(o => o.id !== p.id).map(o => [o.id, o.name, o.position || '']),
+    f: st.nomPrefill.base, q: st.nomPrefill.params.filter(x => x.role !== 'remove').map(x => [x.k, x.role, x.role === 'keep' ? x.v : '', x.q ? 1 : 0]) };
+  return base + '#nom=' + await packData(d);
+}
+function parseNomPrefill(url) {
+  let u; try { u = new URL(String(url).trim()); } catch (e) { return { error: 'This is not a valid web address.' }; }
+  if (!/forms\.(office|microsoft)\.com|forms\.cloud\.microsoft/i.test(u.hostname)) return { error: 'This does not look like a Microsoft Forms link.' };
+  const params = [];
+  u.search.slice(1).split('&').filter(Boolean).forEach(kv => {
+    const i = kv.indexOf('='); const k = safeDec(i < 0 ? kv : kv.slice(0, i)); let v = i < 0 ? '' : safeDec(kv.slice(i + 1).replace(/\+/g, ' ')); let q = false;
+    if (/^".*"$/s.test(v)) { q = true; v = v.slice(1, -1); }
+    const V = v.toUpperCase();
+    params.push({ k, v, q, role: /^(id|origin|lang|embed)$/i.test(k) ? 'keep' : /PEER/.test(V) ? 'nomPeers' : /CODE|NAME|NOMINATOR/.test(V) ? 'nomCode' : 'keep' });
+  });
+  const r = { base: u.origin + u.pathname, params };
+  if (!params.some(p => p.role === 'nomCode') || !params.some(p => p.role === 'nomPeers')) r.error = 'Pre-filled values not found. In the nomination form use "Get Pre-filled URL", type CODE in the first box and PEERS in the second box, then copy the link.';
+  return r;
+}
+async function nomEmail(p) {
+  const st = S.settings, link = await nomLink(p);
+  const text = fill(st.tpl.invite, { name: p.name, nomLink: link });
+  const subject = '[' + st.project + '] Please choose your 360° raters' + (st.deadlineNom ? ' by ' + st.deadlineNom : '');
+  const btn = `<a href="${esc(link)}" style="display:inline-block;background:#005a96;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;font-weight:600">Choose my peers · เลือกผู้ประเมิน</a>`;
+  const html = '<div style="font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1d2733">' +
+    text.split('\n\n').map(par => '<p>' + par.split('\n').map(line => line.trim() === link ? btn : esc(line)).join('<br>') + '</p>').join('') + '</div>';
+  return { subject, text, html, link };
+}
+
+/* ---------- the participant's nomination page (opened from a personal link) ---------- */
+async function renderNomPage() {
+  document.title = 'Choose your peers';
+  let d;
+  try { d = await unpackData(location.hash.slice(5)); if (!d || d.v !== 1) throw 0; }
+  catch (e) { document.body.innerHTML = '<main style="max-width:640px;margin:40px auto;padding:0 16px"><div class="card"><h2>This link is incomplete</h2><p>Please open the link again from your email (the whole link, without changes).</p></div></main>'; return; }
+  const sel = new Set();
+  const lim = () => d.mx ? Math.max(0, d.mx - (d.lm ? 1 : 0)) : 0;
+  document.body.innerHTML = `<div class="top"><h1>${esc(d.pj)}</h1><div class="pj">Rater nomination · เลือกผู้ประเมิน</div></div>
+  <main style="max-width:760px">
+    <div class="card"><h2>สวัสดีคุณ ${esc(d.me)} · Hello ${esc(d.me)}</h2>
+      <p class="hint" style="margin-top:6px">เลือกเพื่อนร่วมงาน (Peers) ที่จะประเมินคุณ${d.mn ? ' อย่างน้อย <b>' + d.mn + '</b> คน' : ''}${lim() ? ' ไม่เกิน <b>' + lim() + '</b> คน' : ''} แล้วกด <b>ส่งรายชื่อ</b><br>
+      Tick the colleagues who will give you feedback${d.mn ? ' (at least ' + d.mn + ')' : ''}${lim() ? ', up to ' + lim() : ''}, then press <b>Submit</b>.${d.dl ? ' Deadline: <b>' + esc(d.dl) + '</b>.' : ''}</p>
+      ${d.lm ? `<div class="note">✓ <b>${esc(d.m)}</b> ประเมินทุกคนในฐานะ Line Manager อยู่แล้ว ไม่ต้องเลือก · evaluates everyone as Line Manager.</div>` : ''}
+      ${d.pp.length > 12 ? '<input id="q" placeholder="ค้นหาชื่อ · Search a name" style="margin:6px 0 10px">' : ''}
+      <div class="pickgrp" id="list">${d.pp.map(([id, n, pos], i) => `<label class="pickrow" data-n="${esc(lc(n))}"><input type="checkbox" data-i="${i}"><b>${esc(n)}</b> <span class="small muted">${esc(pos)}</span></label>`).join('')}</div>
+      <div class="row" style="margin-top:14px"><span id="cnt" class="pill p-grey">เลือกแล้ว 0 คน · 0 selected</span><div class="sp"></div><button class="big" id="go" disabled>ส่งรายชื่อ · Submit</button></div>
+      <div id="msg"></div></div>
+    <p class="small muted">ลิงก์นี้เป็นของคุณคนเดียว กรุณาอย่าส่งต่อ · This link is personal – please do not forward it.</p>
+  </main><div class="toast" id="toast"></div>`;
+  const upd = () => {
+    const n = sel.size, okMin = n >= (d.mn || 1), okMax = !lim() || n <= lim();
+    $('#cnt').textContent = 'เลือกแล้ว ' + n + ' คน · ' + n + ' selected'; $('#cnt').className = 'pill ' + (okMin && okMax ? 'p-ok' : 'p-warn');
+    $('#go').disabled = !(okMin && okMax);
+    $('#msg').innerHTML = !okMax ? `<div class="warnlist">เลือกได้ไม่เกิน ${lim()} คน · max ${lim()}</div>` : n && !okMin ? `<div class="warnlist">ต้องเลือกอย่างน้อย ${d.mn} คน · choose at least ${d.mn}</div>` : '';
+  };
+  document.addEventListener('change', e => { const i = e.target.dataset.i; if (i == null) return; e.target.checked ? sel.add(+i) : sel.delete(+i); e.target.closest('.pickrow').classList.toggle('on', e.target.checked); upd(); });
+  const q = $('#q'); if (q) q.addEventListener('input', () => { const s = lc(q.value); document.querySelectorAll('#list .pickrow').forEach(r => r.style.display = !s || r.dataset.n.includes(s) ? '' : 'none'); });
+  $('#go').addEventListener('click', () => {
+    const peers = [...sel].sort((a, b) => a - b).map(i => d.pp[i][1] + ' (' + d.pp[i][0] + ')').join('; ');
+    const val = r => ({ nomCode: d.c, nomPeers: peers })[r];
+    const url = d.f + '?' + d.q.map(([k, r, v, qq]) => { const x = r === 'keep' ? v : val(r) || ''; return encodeURIComponent(k) + '=' + (qq ? '%22' + encodeURIComponent(x) + '%22' : encodeURIComponent(x)); }).join('&');
+    $('#msg').innerHTML = `<div class="note">ขั้นสุดท้าย: ฟอร์มของ Microsoft จะเปิดขึ้นพร้อมข้อมูลครบ กด <b>Submit</b> ในฟอร์มเพื่อส่ง · Last step: the Microsoft form opens already filled in – press <b>Submit</b> there.<br><a href="${esc(url)}">ถ้าฟอร์มไม่เปิด คลิกที่นี่ · If the form did not open, click here</a></div>`;
+    location.href = url;
+  });
 }
 
 /* ---------- 4 Approve ---------- */
@@ -632,6 +773,8 @@ function matchPerson(v) {
   const em = (s.match(/[^\s()<>;,]+@[^\s()<>;,]+\.[^\s()<>;,]+/) || [])[0];
   const P = S.participants;
   if (em) { const p = P.find(x => lc(x.email) === lc(em)); if (p) return p; }
+  const pid = (s.match(/\(([^()]+)\)\s*$/) || [])[1];
+  if (pid) { const p = P.find(x => lc(x.id) === lc(pid)); if (p) return p; }
   const nm = lc(s.replace(/\(.*?\)|<.*?>/g, ''));
   return P.find(x => lc(x.name) === nm) || P.find(x => lc(x.id) === nm) || null;
 }
@@ -640,6 +783,12 @@ async function importNomXlsx(file) {
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
   if (!rows.length) { alert('The file is empty.'); return; }
   const H = rows[0].map(h => String(h));
+  /* personal-link form: the first box holds "Name · #CODE" */
+  const rev = Object.fromEntries(Object.entries(S.nomCodes || {}).map(([pid, c]) => [c, pid]));
+  if (Object.keys(rev).length) {
+    const codeCol = H.findIndex((h, i) => rows.slice(1).some(r => { const m = String(r[i] ?? '').toUpperCase().match(CODE_RE); return m && rev[m[1]]; }));
+    if (codeCol >= 0) return importNomCoded(rows, H, codeCol, rev);
+  }
   const f = re => H.findIndex(h => re.test(h));
   const col = { who: f(/who are you|คุณคือใคร|your name/i), peer: f(/peer|เพื่อน/i), lm: f(/line manager|หัวหน้า/i), sub: f(/subordinate|ลูกทีม|ลูกน้อง/i), time: f(/completion time|เวลาที่เสร็จ/i), mail: f(/^e-?mail$/i), note: f(/note|หมายเหตุ/i) };
   /* the form has one Peers question per person (branching), so the export has several Peers columns – read them all */
@@ -665,6 +814,34 @@ async function importNomXlsx(file) {
   });
   save(); S.ui.nomFilter = 'all'; render();
   toast(added + ' nomination(s) loaded' + (kept ? ' · ' + kept + ' unchanged' : '') + (unknown.length ? ' · not in participant list: ' + unknown.join(', ') : ''), 6000);
+}
+function importNomCoded(rows, H, codeCol, rev) {
+  const f = re => H.findIndex((h, i) => i !== codeCol && re.test(h));
+  let peerCol = f(/peer|เพื่อน|selected|รายชื่อ/i);
+  if (peerCol < 0) peerCol = H.findIndex((h, i) => i !== codeCol && rows.slice(1).some(r => /\([^)]+\)/.test(String(r[i] ?? ''))));
+  const timeCol = f(/completion time|เวลาที่เสร็จ/i);
+  const latest = {}, rejected = [];
+  rows.slice(1).forEach((r, i) => {
+    if (!r.some(c => c !== '' && c != null)) return;
+    const m = String(r[codeCol] ?? '').toUpperCase().match(CODE_RE);
+    const pid = m && rev[m[1]];
+    if (!pid || !pById()[pid]) { rejected.push('row ' + (i + 2) + ' (' + (String(r[codeCol] || '').slice(0, 40) || 'blank') + ')'); return; }
+    const t = timeCol >= 0 && r[timeCol] ? new Date(r[timeCol]).toISOString() : String(i).padStart(6, '0');
+    if (!latest[pid] || latest[pid].t <= t) latest[pid] = { t, r };
+  });
+  let added = 0, kept = 0; const unknown = [];
+  Object.entries(latest).forEach(([pid, { t, r }]) => {
+    const cur = S.noms[pid];
+    if (cur && cur.formT && cur.formT >= t) { kept++; return; }
+    if (cur && cur.status === 'approved' && !confirm(pById()[pid].name + ' submitted a new list after approval. Replace it (needs approval again)?')) { kept++; return; }
+    const raters = [], seen = new Set([pid]);
+    String(peerCol >= 0 ? r[peerCol] || '' : '').split(/;|\n/).map(x => x.trim()).filter(Boolean).forEach(v => { const q = matchPerson(v); if (!q) { unknown.push(v); return; } if (!seen.has(q.id)) { seen.add(q.id); raters.push({ c: 'P', i: q.id }); } });
+    S.noms[pid] = { status: 'pending', submittedAt: /^\d{4}-/.test(t) ? t : nowIso(), formT: t, note: '', raters };
+    added++;
+  });
+  save(); S.ui.nomFilter = 'all'; render();
+  toast(added + ' nomination(s) loaded' + (kept ? ' · ' + kept + ' unchanged' : '') + (unknown.length ? ' · names no longer in the list: ' + unknown.join(', ') : ''), 6000);
+  if (rejected.length) alert('These answers were NOT counted because the nomination code was changed, deleted or belongs to another project:\n\n' + rejected.join('\n') + '\n\nAsk the person to open their personal link again.');
 }
 function importNomText(txt) {
   const re = /360NOM:([A-Za-z0-9\-_\s>=\r\n]+?):END/g; let m; const found = [];
@@ -783,6 +960,13 @@ function vLaunch() {
       <td><div class="row" style="flex-wrap:nowrap"><button class="sm" data-act="sendOne" data-arg="${esc(lc(r.email))}" title="Opens your email app with the whole message ready – just press Send">✉ Send form via email</button><button class="sm ghost" data-act="preview" data-arg="${esc(lc(r.email))}">View</button></div></td></tr>`; }).join('') || '<tr><td colspan="5" class="muted">Approve nominations first.</td></tr>'}
   </table></div></div>
   <div class="card"><h2>Email preview</h2>${sel ? (() => { const m = taskEmail(sel, S.ui.inclSent || sel.tasks.every(t => S.sent[t.key])); return `<div class="small muted">To: ${esc(sel.email)}<br>Subject: ${esc(m.subject)}</div><div style="border:1px solid var(--line);border-radius:6px;padding:12px;margin-top:8px;max-height:560px;overflow:auto">${m.html}</div>`; })() : '<p class="muted">Click <b>View</b> on an evaluator.</p>'}</div></div>`;
+}
+async function saveQueue(rows, what) {
+  const wb = new ExcelJS.Workbook(), ws = wb.addWorksheet('SendQueue');
+  ws.addTable({ name: 'SendQueue', ref: 'A1', headerRow: true, style: { theme: 'TableStyleLight9', showRowStripes: true },
+    columns: [{ name: 'To' }, { name: 'Name' }, { name: 'Subject' }, { name: 'HtmlBody' }, { name: 'Evaluations' }], rows });
+  ws.columns.forEach((c, i) => c.width = [32, 26, 60, 80, 12][i]);
+  download('360_SendQueue.xlsx', new Blob([await wb.xlsx.writeBuffer()], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
 }
 function markSent(tasks) { const t = nowIso(); tasks.forEach(x => { if (!S.sent[x.key]) S.sent[x.key] = t; }); save(); }
 
@@ -1129,6 +1313,8 @@ document.addEventListener('change', e => {
   if (a === 'setCat') { const [pid, k] = el.dataset.arg.split('|'); S.noms[pid].raters[+k].c = el.value; if (S.noms[pid].status === 'approved') S.noms[pid].status = 'pending'; save(); render(); }
   if (a === 'inclSent') { S.ui.inclSent = el.checked; save(); render(); }
   if (a === 'sendSel') { S.ui.sendSel = S.ui.sendSel || {}; if (el.checked) S.ui.sendSel[el.dataset.arg] = 1; else delete S.ui.sendSel[el.dataset.arg]; save(); render(); }
+  if (a === 'nomSel') { S.ui.nomSel = S.ui.nomSel || {}; if (el.checked) S.ui.nomSel[el.dataset.arg] = 1; else delete S.ui.nomSel[el.dataset.arg]; save(); render(); }
+  if (a === 'nomSelAll') { S.ui.nomSel = {}; if (el.checked) S.participants.forEach(p => S.ui.nomSel[p.id] = 1); save(); render(); }
   if (a === 'sendSelAll') { S.ui.sendSel = {}; if (el.checked) recipients().forEach(r => S.ui.sendSel[lc(r.email)] = 1); save(); render(); }
 });
 document.addEventListener('click', async e => {
@@ -1138,9 +1324,12 @@ document.addEventListener('click', async e => {
   switch (a) {
     case 'tab': S.ui.tab = arg; save(); render(); window.scrollTo(0, 0); break;
     case 'backup': download(safeName(st.project) + '_360_backup_' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(S, null, 1), 'application/json'); break;
-    case 'restore': { const [f] = await pickFile('.json'); if (!f) return; try { const s = JSON.parse(new TextDecoder().decode(await readAB(f))); if (!s.settings) throw 0; S = merge(defaultState(), s); save(); render(); toast('Backup loaded'); } catch (er) { alert('This is not a valid backup file.'); } break; }
+    case 'restore': { const [f] = await pickFile('.json'); if (!f) return; try { const s = JSON.parse(new TextDecoder().decode(await readAB(f))); if (!s.settings) throw 0; S = migrate(merge(defaultState(), s)); save(); render(); toast('Backup loaded'); } catch (er) { alert('This is not a valid backup file.'); } break; }
     case 'reset': if (confirm('Start a new project? Everything in this browser will be cleared. Save a backup first if you need it.')) { S = defaultState(); save(); render(); } break;
-    case 'parsePf': { const url = $('#pfUrl').value.trim(); st.formUrl = url; st.prefill = url ? parsePrefill(url) : null; save(); render(); break; }
+    case 'connectNow': S.ui.connectAsked = 1; S.ui.tab = 'setup'; save(); render(); setTimeout(() => { const c = $('#connectCard'); c && c.scrollIntoView({ behavior: 'smooth' }); }, 50); break;
+    case 'connectLater': S.ui.connectAsked = 1; save(); render(); break;
+    case 'parseNomPf': { const url = $('#nomPfUrl').value.trim(); st.nomFormUrl = url; st.nomPrefill = url ? parseNomPrefill(url) : null; save(); render(); toast(nomFormReady() ? 'Nomination form connected ✔' : 'Not connected yet – see the message', 4000); break; }
+    case 'parsePf': { const url = $('#pfUrl').value.trim(); st.formUrl = url; st.prefill = url ? parsePrefill(url) : null; save(); render(); toast(evalFormReady() ? 'Evaluation form connected ✔' : 'Not connected yet – see the message', 4000); break; }
     case 'uploadPeople': { const f = await pickFile('.xlsx,.xls,.csv'); importPeople(f[0]); break; }
     case 'tplPeople': tplPeople(); break;
     case 'addPerson': S.participants.push({ id: 'P' + String(S.participants.length + 1).padStart(3, '0') + rid().slice(0, 2), name: '', email: '', position: '', org: '', lm: '' }); save(); render(); break;
@@ -1149,7 +1338,25 @@ document.addEventListener('click', async e => {
     case 'dlKit': {
       const bad = S.participants.filter(p => !isEmail(p.email) || !p.name); if (bad.length) { alert('Fix names/emails first: ' + bad.map(p => p.name || p.id).join(', ')); return; }
       download(kitFileName(), kitHtml(), 'text/html'); toast('Saved ' + kitFileName() + ' – attach it to the invitation email'); break; }
-    case 'mailInvite': openMail(mailto(st.managerEmail, '[' + st.project + '] Please nominate your 360° raters by ' + (st.deadlineNom || 'the deadline'), fill(st.tpl.invite), { bcc: S.participants.map(p => p.email) })); break;
+    case 'mailInvite': openMail(mailto(st.managerEmail, '[' + st.project + '] Please nominate your 360° raters by ' + (st.deadlineNom || 'the deadline'), 'Dear colleagues,\n\nPlease choose the colleagues (peers) who will give you feedback. Click this link, pick your name and tick your peers:\n' + (st.nomUrl || '') + '\n\nPlease submit by ' + (st.deadlineNom || 'the deadline') + '.\n\nThank you,\n' + (st.managerName || ''), { bcc: S.participants.map(p => p.email) })); break;
+    case 'nomSendOne': {
+      const p = pById()[arg]; if (!p) return;
+      const m = await nomEmail(p); if (!m.link) { toast('Connect the nomination form and open the program from its web address first.', 6000); return; }
+      S.nomSent = S.nomSent || {}; S.nomSent[p.id] = nowIso(); save(); render();
+      const url = mailto(p.email, m.subject, m.text);
+      if (url.length <= 2000) { location.href = url; toast('Email opened with the personal link – press Send.', 5000); break; }
+      download(safeName(p.name) + '_nomination.eml', eml(p.email, m.subject, m.html), 'message/rfc822');
+      toast('The link is long, so the email was saved as a ready email: open "' + safeName(p.name) + '_nomination.eml" → Send.', 9000); break; }
+    case 'nomCopy': { const p = pById()[arg]; const l = await nomLink(p); if (l) { await copyText(l); toast('Personal link copied – paste it into an email or chat to ' + p.name, 4000); } break; }
+    case 'nomTest': { const p = pById()[arg]; const l = await nomLink(p); if (l) window.open(l, '_blank', 'noopener'); break; }
+    case 'nomSendSel': case 'nomSendAll': {
+      const SEL = S.ui.nomSel || {};
+      const people = S.participants.filter(p => a === 'nomSendSel' ? SEL[p.id] : (!S.noms[p.id] || S.noms[p.id].status === 'none'));
+      if (!people.length) return;
+      const rows = []; for (const p of people) { const m = await nomEmail(p); if (!m.link) { toast('Connect the nomination form first.', 5000); return; } rows.push([p.email, p.name, m.subject, m.html, 1]); }
+      await saveQueue(rows, 'Nominations');
+      if (confirm('360_SendQueue.xlsx saved with ' + rows.length + ' personal nomination email(s):\n\n' + people.map(p => '• ' + p.name).join('\n') + '\n\nNext: replace the file in OneDrive › 360, then run the Power Automate flow "360 Send evaluation emails".\n\nMark these links as sent?')) { const t = nowIso(); S.nomSent = S.nomSent || {}; people.forEach(p => S.nomSent[p.id] = t); S.ui.nomSel = {}; save(); }
+      render(); break; }
     case 'copyNames': copyText(S.participants.map(p => p.name + ' (' + p.email + ')').join('\n')); break;
     case 'sendOne': {
       const r = recipients().find(x => lc(x.email) === arg); if (!r) return;
@@ -1245,7 +1452,7 @@ document.addEventListener('click', async e => {
   }
   if (S._dirty) { delete S._dirty; save(); }
 });
-render();
+if (NOM_MODE) renderNomPage(); else render();
 </script>
 </body>
 </html>
